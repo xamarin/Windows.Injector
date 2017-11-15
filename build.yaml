@@ -1,0 +1,78 @@
+queue: Hosted VS2017
+
+steps:
+
+- checkout: self
+  clean: true
+
+- task: MSBuild@1
+  displayName: Restore
+  inputs:
+    solution: build.proj
+    msbuildArguments: /t:Restore
+
+- task: MSBuild@1
+  displayName: Restore
+  inputs:
+    solution: build.proj
+    msbuildArguments: /t:Build;Pack /p:Out="$(Build.ArtifactStagingDirectory)" /bl:"$(Build.ArtifactStagingDirectory)\build.binlog"
+
+- powershell: |
+    $packageName = Get-ChildItem -Path "$(Build.ArtifactStagingDirectory)" -Filter *.nupkg | Select-Object -First 1 | %{ $_.FullName }
+    Write-Host "##vso[task.setvariable variable=Xamarin.PackageName;]$packageName"
+  displayName: Get Package Path
+  condition: succeeded()
+
+- task: AzureFileCopy@1
+  displayName: Upload Package To Sign
+  condition: succeeded()
+  inputs:
+    SourcePath: $(Build.ArtifactStagingDirectory)\$(Xamarin.PackageName)
+    ConnectedServiceNameSelector: ConnectedServiceNameARM
+    ConnectedServiceNameARM: 67f90a35-e324-43b2-be92-d9b8f5fb0efe
+    Destination: AzureBlob
+    StorageAccountRM: bosstoragemirror
+    ContainerName: windows-injector
+    BlobPrefix: to-sign/$(Build.SourceVersion)/$(Build.BuildId)
+    outputStorageUri: Xamarin.ContainerUri
+
+- task: JenkinsQueueJob@2
+  displayName: Sign Package
+  condition: succeeded()
+  inputs:
+    serverEndpoint: Xamarin Code Signing Jenkins
+    jobName: sign-to-storage
+    captureConsole: 'true'
+    capturePipeline: 'true'
+    parameterizedJob: 'true'
+    jobParameters: |
+      FILE_PATHS=$(Xamarin.ContainerUri)/to-sign/$(Build.SourceVersion)/$(Build.BuildId)/$(Xamarin.PackageName)
+      UPLOAD_DEST=azure
+    
+- powershell: | 
+    $signedPath = "$(Xamarin.ContainerUri)/to-sign/$(Build.SourceVersion)/$(Build.BuildId)/$(Xamarin.PackageName)"
+    Invoke-WebRequest -OutFile "$(Build.ArtifactStagingDirectory)\$(Xamarin.PackageName)" $signedPath
+  displayName: Download Signed Package
+  condition: succeeded()
+
+- task: NuGetCommand@2
+  displayName: NuGet Update
+  inputs:
+    command: custom
+    arguments: update -self
+
+- task: NuGetCommand@2
+  displayName: NuGet Update
+  inputs:
+    command: push
+    arguments: update -self
+    searchPatternPush: $(Build.ArtifactStagingDirectory)\\$(Xamarin.PackageName)
+    nuGetFeedType: external
+    externalEndpoint: Xamarin nuget.org
+
+- task: PublishBuildArtifacts@1
+  displayName: Publish Artifact
+  inputs:
+    PathtoPublish: $(Build.ArtifactStagingDirectory)
+    ArtifactName: output
+    ArtifactType: Container
